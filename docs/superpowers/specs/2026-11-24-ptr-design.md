@@ -1,11 +1,13 @@
-# 강남~양재 V2V 협조 주행 시뮬레이션 — 설계 스펙
+# PTR (Project Traffic Reduce) — 설계 스펙
 
 날짜: 2026-11-24  
-상태: 초안 (구현 전 사용자 검토용)
+상태: 초안 (구현 전 사용자 검토용)  
+프로젝트명: **Project Traffic Reduce (PTR)**  
+부제: 강남~양재 V2V 협조 주행 시뮬레이션
 
 ## 1. 목표
 
-퇴근시간대 강남권 도로망에서 차량을 논리 인스턴스로 두고, 목적지·차선변경 의도를 교환하며 셀(그리드) 진입을 통제하는 협조 주행을 시뮬한다. 협조 on/off(BASELINE vs COOP)를 비교해 평균 통행시간·정차·대기열 효과를 측정한다.
+퇴근시간대 강남권 도로망에서 차량을 논리 인스턴스로 두고, 목적지·차선변경 의도를 교환하며 셀(그리드) 진입을 통제하는 협조 주행으로 **교통 정체를 줄이는(Traffic Reduce)** 효과를 시뮬한다. 협조 on/off(BASELINE vs COOP)를 비교해 평균 통행시간·정차·대기열을 측정한다.
 
 포트폴리오 포지션: **Java 백엔드** (대규모 인스턴스 오케스트레이션, Redis 메시징, 락, 배치 파이프라인, ERD). SUMO는 도로 물리 엔진이며 Python은 TraCI 어댑터만 담당한다.
 
@@ -174,8 +176,11 @@ TOPIS xlsx → Spring Batch ETL → PostgreSQL
 4. BASELINE vs COOP `run_metric` 비교 테이블/리포트  
 5. README에 아키텍처·ERD·파이프라인·로컬 실행·성능(동시 차량 수, 틱 지연) 수치  
 
-## 10. 레포 위치
+## 10. 레포·아티팩트 이름
 
-`C:\Users\ryudw\source\gangnam-yangjae-v2v`
+- 레포 경로: `C:\Users\ryudw\source\ptr`
+- Gradle root / artifact: `ptr` (예: `com.ptr`, 모듈 `ptr-etl`, `ptr-orchestrator`, …)
+- Docker compose 프로젝트명: `ptr`
+- Redis key prefix: `ptr:sim:{runId}:…`
 
 데이터 원본은 레포 밖(OneDrive). 레포에는 샘플 fixture·생성 CSV/flows만 커밋 (대용량 xlsx는 `.gitignore`).
