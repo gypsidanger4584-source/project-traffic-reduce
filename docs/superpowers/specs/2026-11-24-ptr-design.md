@@ -34,9 +34,11 @@
 
 - 원천: `C:\Users\ryudw\OneDrive\바탕 화면\project etc\25년도 교통량\` 2025년 1–12월 월별 xlsx
 - 주중 정의(2024 서울시 교통량 조사자료와 동일): **월–금, 공휴일 제외**
-- 첨두 창: 출근 **07–09**, 퇴근 **17–19** (도시 전체·간선 유출 기준). 시뮬 우선 시나리오는 **퇴근 남하**
-- 시뮬 워밍업: 16시부터 투입, 비교 구간은 17–19시
-- 통계: 지점·방향·시간대별 **중앙값** 및 **P90** 프로파일 두 종
+- 첨두(비교 성적): 출근 **07–09**, 퇴근 **17–19** (시 포함: 07·08·09 / 17·18·19)
+- 워밍업: 출근 **06시**, 퇴근 **16시** (비교 구간 직전 1시간). 성적 집계에는 넣지 않음
+- ETL/`traffic_raw_hourly` v1 적재 시: **`hour IN (6,7,8,9,16,17,18,19)`만** (0–23 전체 아님). 이후 확장 가능
+- 통계: 지점·방향·시간대별 **중앙값** 및 **P90**. 프로파일은 `AM`|`PM` × `MEDIAN`|`P90` (슬롯에 워밍업 시 포함 → 시뮬 투입용, 리포트 비교 창은 첨두만)
+
 - B-11·B-16: 싱크·검증용 집계만. 경부 본선 통과 교통을 vehsPerHour로 넣지 않음
 - 뱅뱅 이남 직진 비율 등 회전 분담은 검지기 부재로 **가정값을 문서에 고정**하고 민감도만 수행
 
@@ -84,15 +86,44 @@ TOPIS xlsx → Spring Batch ETL → PostgreSQL
 
 원본/정제 분리, 프로파일 불변(새 버전 insert), 핫패스는 Redis.
 
-### 4.1 마스터·수요
+### 4.1 마스터·수요 (P1 — 2026-11-25 합의)
 
-- `detector` — code, name, lat, lon, road_role(`MAIN`|`PARALLEL`|`EXIT_SINK`), lanes_in/out
-- `detector_direction` — detector_id, dir(`IN`|`OUT`), labels, corridor_sense
-- `holiday` — date, name (2025)
-- `traffic_raw_hourly` — 엑셀 그대로
-- `traffic_hourly` — 월–금 ∧ ¬holiday
-- `demand_profile` — name, year, peak(AM/PM), stat(MEDIAN/P90)
-- `demand_profile_slot` — profile_id, detector_id, dir, hour, vehs_per_hour
+적재 시: `hour IN (6,7,8,9,16,17,18,19)`. 비교 성적 창: AM 7–9 / PM 17–19. 워밍업: 6 / 16.
+
+**검증 완료(초안 잠금) ↓**
+
+- `detector`
+  - `id` PK
+  - `code` UNIQUE NOT NULL — 엑셀 지점번호
+  - `name` NOT NULL — 엑셀 지점명칭
+  - `road_role` CHECK `MAIN|PARALLEL|EXIT_SINK` — 스펙 부여
+  - `lat`, `lon` NOT NULL — 엑셀 좌표 (합의: 포함)
+- `detector_direction`
+  - `id` PK
+  - `detector_id` FK → detector
+  - `dir` CHECK `IN|OUT` — 엑셀 방향(유입/유출)
+  - `label` — 엑셀 구분
+  - UNIQUE `(detector_id, dir)`
+- `holiday`
+  - `date` PK, `name` — 2025 공휴일 시드
+- `traffic_raw_hourly` (긴 형식)
+  - `detector_direction_id` FK, `obs_date`, `hour`, `volume` (null 허용)
+  - `day_of_week`, `source_file` (선택)
+  - CHECK hour ∈ {6,7,8,9,16,17,18,19}
+  - UNIQUE `(detector_direction_id, obs_date, hour)`
+- `traffic_hourly`
+  - raw와 동일 핵심 컬럼
+  - 행 조건: 월–금 ∧ ¬holiday (날짜 기준). 프로파일 입력층
+
+**검증 완료(프로파일) ↓**
+
+- `demand_profile`
+  - `id` PK, `name`, `year`, `peak` CHECK `AM|PM`, `stat` CHECK `MEDIAN|P90`, `created_at`
+  - UNIQUE `(year, peak, stat)` (또는 name UNIQUE — 구현 시 하나 선택)
+- `demand_profile_slot`
+  - `profile_id` FK, `detector_direction_id` FK, `hour`, `vehs_per_hour`, `sample_n`
+  - UNIQUE `(profile_id, detector_direction_id, hour)`
+  - hour ∈ 해당 peak 집합 (AM: 6–9, PM: 16–19)
 
 ### 4.2 시뮬·그리드·차량
 
@@ -184,3 +215,56 @@ TOPIS xlsx → Spring Batch ETL → PostgreSQL
 - Redis key prefix: `ptr:sim:{runId}:…`
 
 데이터 원본은 레포 밖(OneDrive). 레포에는 샘플 fixture·생성 CSV/flows만 커밋 (대용량 xlsx는 `.gitignore`).
+
+## 11. 스키마·제약 규칙 (EvCharge 교훈)
+
+- 스키마 진실은 **Flyway만**. `ddl-auto` / Hibernate 자동 생성 **금지**.
+- FK, UNIQUE, CHECK, (필요 시) partial unique는 **마이그레이션 설계 단계**에서 선제 작성. 앱 락만으로 정합성을 미루지 않음.
+- 프로파일·런 이력은 **불변(append)**. 수정이 필요하면 새 버전/새 `sim_run` row.
+- JPA 엔티티는 Flyway 스키마를 따름. 엔티티에 없는 제약을 “나중에 인덱스”로 미루지 않음.
+
+## 12. 워커 모델 (차량 ≠ 프로세스)
+
+- “차량 N대”는 **논리 엔티티** 수. OS 프로세스/JVM을 N개 띄우지 않음.
+- 논리 차량 M개 ⊆ **워커 N개**(셀·구간 파티션). 워커가 담당 차량 상태를 틱 처리.
+- 워커 간 조율은 Redis(Streams 또는 Pub/Sub + 셀 락). v1 메시징은 Redis 우선. Kafka는 후속 옵션(트래픽·다중 토픽 필요 시 ADR).
+- 포트폴리오 스토리: “다수 인스턴스 오케스트레이션” = **워커 N + Redis 조율**, 프로세스 1만이 아님.
+
+## 13. 단계(Phase)와 수치 나오는 시점
+
+범위 폭주 방지. 한 번에 ETL+오케스트레이션+메시징+지표+심화를 끝내지 않음.  
+EvCharge **서버 2대 만료·kill 실측**은 PTR 범위 밖 → EvCharge에서 병행(반나절급).
+
+| Phase | 내용 | 수치가 나오는 시점 (성공 신호) |
+|-------|------|-------------------------------|
+| **P1** | Flyway 스키마 + TOPIS ETL → DB. 적재 방식 비교(예: row-by-row vs batch/bulk) | 적재 시간·건수, 프로파일 slot row 수, 평일 필터 검증 |
+| **P2** | 단일 프로세스 시뮬 + 틱/이벤트 로그 저장. 인덱스·`EXPLAIN` | 틱당 지연, 로그 insert TPS, 슬로우 쿼리 전후 |
+| **P3** | 워커 N 분산 + Redis Streams/PubSub | 워커 수·처리량·락 대기, 단일 프로세스 대비 비교 |
+| **P4** | SUMO 연동 + BASELINE vs COOP 지표 | 통행시간·정체 구간 상대 비교 (효과 크기 단정 금지) |
+
+권장 착수: **P1**. JPA·DB 목표를 가장 빨리 채움.  
+첨두: **07–09(AM) + 17–19(PM)** 둘 다. raw 시 집합: **6–9, 16–19**. 계절·요일 매트릭스는 v1 비범위.
+
+## 14. EvCharge 대비 메울 구멍 · 심화 범위 (DB/JPA 중심)
+
+EvCharge에서 약했던 것 → PTR에서 의도적으로 채울 축.
+
+| 구멍 | PTR에서 | Phase |
+|------|---------|-------|
+| 스키마 후순위, DB 최종 방어 늦음 | Flyway + FK/UNIQUE/CHECK 선제 | P1 |
+| Redis = 락뿐 | Streams/PubSub로 의도·슬롯 메시지 | P3 |
+| 배치·대량 적재 스토리 없음 | Spring Batch ETL, bulk 비교 | P1 |
+| 단일 도메인 CRUD 폭 | 멀티모듈 + 오케스트레이션 | P2–P3 |
+| 효과·성능 수치 빈약 | 적재시간 / 틱지연 / 지표 비교 | 매 Phase |
+
+**P1에서 깊게 팔 DB/JPA (이번 우선):**
+
+1. ERD → Flyway SQL (타입, FK, UNIQUE, CHECK, 인덱스 의도)
+2. 원본/정제 분리, 멱등 재적재 정책
+3. Spring Batch chunk·트랜잭션 경계 vs `JdbcClient`/`COPY`/bulk 비교 (시간 측정)
+4. 연관·페치: N+1 피하기, 집계는 엔티티 대신 프로젝션/네이티브·JPQL
+5. 인덱스 설계 + `EXPLAIN (ANALYZE)`로 슬로우 구간 증명
+
+**P2 이후 DB 심화 (예약):** `cell_snapshot`/`tick_log` 대량 insert, 파티셔닝 여부 ADR, 핫패스 Redis vs 콜드 Postgres 경계.
+
+**의도적 비범위 (지금 안 잡음):** Kafka 필수화, 클라우드 배포, 인증/인가, EvCharge급 분산락 면접 스토리 재탕(셀 락은 필요 시 P3에서 최소).
